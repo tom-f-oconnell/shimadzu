@@ -289,7 +289,7 @@ def print_peak_warnings(all_data, min_similarity=0, peak_marks=True,
 # TODO could check all sample file names are equal to sample names
 
 if __name__ == '__main__':
-    data = read('data/example/ASCIIData.txt')
+    data = read('example_data/ASCIIData.txt')
 
     print_peak_warnings(data)
 
