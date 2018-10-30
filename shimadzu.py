@@ -9,6 +9,8 @@ job in the batch settings.
 
 import sys
 from io import StringIO
+import traceback
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -111,6 +113,9 @@ def spectrum_process_table(body):
     """
     body (str): the section of the ASCII output that corresponds to this table,
     without the first line with the section name in square brackets
+
+    This table seems to need to be non-empty for any section for the
+    similarity_search_results to appear at all.
     """
     df = pd.read_table(StringIO(body), skiprows=2).set_index('Spectrum#')
     # TODO make sure to be consistent each time same id is used
@@ -126,6 +131,10 @@ def similarity_search_results(body):
     """
     body (str): the section of the ASCII output that corresponds to this table,
     without the first line with the section name in square brackets
+
+    It seems that if the spectrum process table is empty, a section for this
+    table will not appear, even if the box for this section is checked in the
+    output options.
     """
     return pd.read_table(StringIO(body), skiprows=1).rename(
         columns=normalize_name).set_index('spectrum')
@@ -154,9 +163,10 @@ def normalize_name(n):
     return n
 
 
-def read(filename):
+def read(filename, warn_missing_sections=False):
     """
     """
+    # TODO TODO warn for each file that seems to be unannotated
     name2parser = {
         'mc_peak_table': mc_peak_table,
         'spectrum_process_table': spectrum_process_table,
@@ -164,6 +174,11 @@ def read(filename):
         'ms_column_performance_table': ms_column_performance_table,
         'ms_spectrum': MassSpectrum,
         'ms_chromatogram': Chromatogram
+    }
+    required_tables = {
+        'sample_information',
+        'mc_peak_table',
+        'similarity_search_results'
     }
     with open(filename, 'r') as data:
 
@@ -174,30 +189,62 @@ def read(filename):
         # by 1?)
         one_sample_data['ms_spectrum'] = []
         section_name = None
+        sample_name = None
+        skipping = False
 
         for line_num, line in enumerate(data):
-            # TODO need to modify this s.t. we can actually parse last section
-            # (|| EOF?)
             if line[0] == '[':
-                # TODO TODO TODO derive sample name from header / sample info (+
-                # maybe check them against each other)
-                if (section_name is not None and not
+                # TODO derive sample name from header / sample info (+ maybe
+                # check them against each other)
+                if ((not skipping) and section_name is not None and not
                     (len(section_body) == 2 and section_body.strip() == '')):
 
                     parsed = None
-                    if section_name in name2parser:
-                        parsed = name2parser[section_name](section_body)
-
-                    else:
-                        try:
+                    try:
+                        if section_name in name2parser:
+                            parsed = name2parser[section_name](section_body)
+                        else:
                             parsed = keyvalue_table(section_body)
-                        except Exception as e:
-                            print(e)
-                            # TODO also get section start line?
-                            print('At line {}'.format(line_num))
-                            print(section_name)
-                            print(section_body)
-                            sys.exit()
+
+                    except Exception as e:
+                        quit = True
+                        if isinstance(e, pd.errors.EmptyDataError):
+                            if section_name in required_tables:
+                                warnings.warn(('Skipping sample {} because it' +
+                                    ' is missing required section {}.').format(
+                                    sample_name, section_name))
+
+                                one_sample_data = dict()
+                                one_sample_data['ms_spectrum'] = []
+                                section_name = None
+                                sample_name = None
+                                section_body = ''
+                                skipping = True
+                                # TODO maybe use a flag to still print the rest
+                                # of the debug info before continuing
+                                continue
+
+                            elif warn_missing_sections:
+                                # TODO TODO configure warning to fire more than
+                                # once!
+                                warnings.warn('Empty {}!'.format(section_name))
+                            quit = False
+
+                        if quit or warn_missing_sections:
+                            print('')
+                            if quit:
+                                traceback.print_tb(e.__traceback__)
+                            print(e, file=sys.stderr)
+                            if quit:
+                                print('')
+                            print('Sample: {}'.format(sample_name))
+                            print(('In section {}, ending at line {} in file ' +
+                                '{}').format(section_name, line_num, filename))
+                            if quit:
+                                print('<section body>')
+                                print(section_body)
+                                print('<end of section body>')
+                                sys.exit()
 
                     if parsed is not None:
                         if section_name == 'ms_spectrum':
@@ -208,18 +255,15 @@ def read(filename):
                                 section_name))
                         else:
                             one_sample_data[section_name] = parsed
+                            if section_name == 'sample_information':
+                                # TODO TODO just convert all keyvalue tables to
+                                # series to avoid having to index column first
+                                # w/ number 1 
+                                sample_name = one_sample_data[
+                                    'sample_information'][1].at['sample_name']
 
                 section_body = ''
                 section_name = line[1:-2]
-                if len(one_sample_data) > 1 and section_name == 'Header':
-                    # TODO TODO just convert all keyvalue tables to series to
-                    # avoid having to index column first w/ number 1 
-                    sample_name = one_sample_data['sample_information'][1
-                        ].at['sample_name']
-
-                    sample_data[sample_name] = one_sample_data
-                    one_sample_data = dict()
-                    one_sample_data['ms_spectrum'] = []
 
                 if section_name == ('MS Similarity Search Results ' +
                     'for Spectrum Process Table'):
@@ -228,28 +272,63 @@ def read(filename):
                 else:
                     section_name = section_name.lower().replace(' ', '_')
 
+                if section_name == 'header':
+                    skipping = False
+                    if len(one_sample_data) > 1:
+                        sample_data[sample_name] = one_sample_data
+                        one_sample_data = dict()
+                        one_sample_data['ms_spectrum'] = []
+                        section_name = None
+                        sample_name = None
+
             else:
                 section_body += line
 
         # TODO TODO refactor so i don't have to repeat most of the logic of
         # the loop here to cover border case (last section, last sample)
         # TODO factor into like a try_parse function or something?
-        if (section_name is not None and not
+        if ((not skipping) and section_name is not None and not
             (len(section_body) == 2 and section_body.strip() == '')):
 
             parsed = None
-            if section_name in name2parser:
-                parsed = name2parser[section_name](section_body)
-
-            else:
-                try:
+            try:
+                if section_name in name2parser:
+                    parsed = name2parser[section_name](section_body)
+                else:
                     parsed = keyvalue_table(section_body)
-                except Exception as e:
-                    print(section_body)
-                    print('In table {}, ending at line {}'.format(section_name,
-                        line_num))
-                    print(e)
-                    sys.exit()
+
+            except Exception as e:
+                quit = True
+                if isinstance(e, pd.errors.EmptyDataError):
+                    if section_name in required_tables:
+                        warnings.warn(('Skipping sample {} because it' +
+                            ' is missing required section {}.').format(
+                            sample_name, section_name))
+                        # TODO maybe use a flag to still print the rest
+                        # of the debug info before continuing
+                        return
+
+                    elif warn_missing_sections:
+                        # TODO TODO configure warning to fire more than
+                        # once!
+                        warnings.warn('Empty {}!'.format(section_name))
+                    quit = False
+
+                if quit or warn_missing_sections:
+                    print('')
+                    if quit:
+                        traceback.print_tb(e.__traceback__)
+                    print(e, file=sys.stderr)
+                    if quit:
+                        print('')
+                    print('Sample: {}'.format(sample_name))
+                    print(('In section {}, ending at line {} in file ' +
+                        '{}').format(section_name, line_num, filename))
+                    if quit:
+                        print('<section body>')
+                        print(section_body)
+                        print('<end of section body>')
+                        sys.exit()
 
             if parsed is not None:
                 if section_name == 'ms_spectrum':
@@ -274,6 +353,7 @@ def print_peak_warnings(sample_data, min_similarity=93, peak_marks=True,
     """
     For manual checking and correction.
     """
+    # TODO TODO summary of files missing certain types of annotations
     lwidth = 80
     def print_marked(name, mark):
         marked = marks[marks.apply(lambda x: mark in x)]
@@ -313,31 +393,42 @@ def print_peak_warnings(sample_data, min_similarity=93, peak_marks=True,
         # CDF and read that way?
 
         if min_similarity > 0:
-            simsearch = data['similarity_search_results']
-            low_similarity = simsearch[(simsearch['hit'] == 1) &
-                (simsearch['si'] < min_similarity)]
+            if 'similarity_search_results' in data:
+                simsearch = data['similarity_search_results']
+                low_similarity = simsearch[(simsearch['hit'] == 1) &
+                    (simsearch['si'] < min_similarity)]
 
-            # TODO sort from lowest sim to highest?
-            if len(low_similarity) > 0:
-                print('Peaks with SI less than {}:'.format(min_similarity))
-                for i, r in low_similarity.iterrows():
-                    # TODO fixed width
-                    print('{} - {}'.format(i, r['si']))
-                print('')
+                # TODO sort from lowest sim to highest?
+                if len(low_similarity) > 0:
+                    print('Peaks with SI less than {}:'.format(min_similarity))
+                    for i, r in low_similarity.iterrows():
+                        # TODO fixed width
+                        print('{} - {}'.format(i, r['si']))
+                    print('')
+            else:
+                warnings.warn('Can not print low similarity compounds, ' +
+                    'because there was no similarity search results in ' +
+                    'the output. Spectrum process table must be non-empty.')
 
         # TODO manually check labels between other two tables and
         # similarity_search_results seems right, since it doesn't have something
         # like the retention time to check automatically
-        assert np.all(data['mc_peak_table'].index.unique() ==
-                data['spectrum_process_table'].index.unique())
+        # TODO TODO allow spectrum process table to be less than length of
+        # mc_peak_table, as it seems it doesn't always come into consideration
+        # if you do some kind of manual integration (or maybe it was an
+        # unannotated file???)
+        if 'spectrum_process_table' in data:
+            assert np.all(data['mc_peak_table'].index.unique() ==
+                    data['spectrum_process_table'].index.unique())
 
-        # data['mc_peak_table'].ret_time seems closest to "top" from
-        # spectrum_process_table which, at least for the automatic peak calling,
-        # is the same for both the background and raw columns in that table.
-        assert np.allclose(data['mc_peak_table'].ret_time,
-            data['spectrum_process_table']['raw','top'], atol=5e-3)
-        # TODO (above) are these the appropriate columns to match up, if this
-        # atol is required?
+            # data['mc_peak_table'].ret_time seems closest to "top" from
+            # spectrum_process_table which, at least for the automatic peak
+            # calling, is the same for both the background and raw columns in
+            # that table.
+            assert np.allclose(data['mc_peak_table'].ret_time,
+                data['spectrum_process_table']['raw','top'], atol=5e-3)
+            # TODO (above) are these the appropriate columns to match up, if
+            # this atol is required?
 
         unidentified = \
             data['mc_peak_table'][data['mc_peak_table'].name.isnull()].index
@@ -350,6 +441,44 @@ def print_peak_warnings(sample_data, min_similarity=93, peak_marks=True,
         print('\n' + ('#' * lwidth))
 
 
+def standardize(sample_data, standard_data, thru_origin=True):
+    """
+    Args:
+    sample_data (dict): returned by read function, with the input file
+        containing all data on the unknown mixtures.
+    standard_data (dict): returned by read function, with the input file
+        containing all data from external standards.
+    thru_origin (bool): (default=True) If True, forces calibration curve through
+        (0, 0).
+
+    Returns a dict like sample_data, but with a "concentration" column added to
+    each table with an "area" column.
+    """
+    # TODO support picking out samples that are supposed to be standards with
+    # flags built in to shimadzu software?
+    # TODO support loading calibration output from their software into the same
+    # format this returns
+
+    chem2curve = dict()
+    for name, data in standard_data.items():
+        # TODO sufficient to use CAS in similarity search table to normalize
+        # within CAS returned from this similarity search?
+        # or is it not-invertible, as (name->pubchem search->CAS) seemed to be?
+        #chem_id = chemutils.name2inchi(name)
+        #chem2curve[chem_id] = 
+        import ipdb
+        ipdb.set_trace()
+        assert len(data['mc_peak_table']) == 1
+        #assert len(data['ms
+
+
+    standardized_data = dict()
+    
+
+    # TODO TODO standardize within tuning file. within anything else?
+
+    return standardized_data
+
 # TODO make enclosing class w/ all of the data from a run? put it all in a big
 # table across runs (well, most?)?
 
@@ -359,12 +488,14 @@ def print_peak_warnings(sample_data, min_similarity=93, peak_marks=True,
 
 # TODO could check all sample file names are equal to sample names
 
-# TODO TODO standardize within tuning file. within anything else?
 
 if __name__ == '__main__':
-    data = read('example_data/ASCIIData_min_sim_92.txt')
+    sample_data = read('example_data/run2_d1_dan.txt')
 
-    print_peak_warnings(data)
+    print_peak_warnings(sample_data)
+
+    standard_data = read('example_data/run2_dan_standards.txt')
+    sample_data = standardize(sample_data, standard_data)
 
     # TODO TODO try to calibrate samples with one m/z peak saturated, from other
     # peaks
