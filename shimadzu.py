@@ -20,11 +20,16 @@ class Sample:
 
 
 class MassSpectrum:
-    def __init__(self, section_body):
+    # TODO implement __str__ method
+    def __init__(self, body):
+        """
+        body (str): the section of the ASCII output that corresponds to this
+        table, without the first line with the section name in square brackets
+        """
         # TODO more efficient way to index first three lines w/o processing full
         # table? (maybe always work w/ lists and just concat relevant lines
         # before df parsing?)
-        lines = section_body.split('\n')
+        lines = body.split('\n')
 
         # TODO is "spectrum range" an appropriate way to describe the
         # information in these lines?
@@ -44,7 +49,7 @@ class MassSpectrum:
         # TODO why does "Event# <N>" (line before MS spectrum table header)
         # always have N=1? just toss this line?
 
-        self.df = pd.read_table(StringIO(section_body), skiprows=5).rename(
+        self.df = pd.read_table(StringIO(body), skiprows=5).rename(
             columns=normalize_name).set_index('m/z').drop(
             columns='relative_intensity')
 
@@ -54,7 +59,12 @@ class MassSpectrum:
 # otherwise, how do i want to associate peak # from chromatogram with spectra?
 
 class Chromatogram:
+    # TODO implement __str__ method
     def __init__(self, body):
+        """
+        body (str): the section of the ASCII output that corresponds to this
+        table, without the first line with the section name in square brackets
+        """
         lines = body.split('\n')
         # TODO want other lines?
         self.event_time_ms = int(lines[1].split()[-1])
@@ -65,6 +75,8 @@ class Chromatogram:
 
 def mc_peak_table(body):
     """
+    body (str): the section of the ASCII output that corresponds to this table,
+    without the first line with the section name in square brackets
     """
     # TODO want to record "Mass TIC" line, for applicability in cases where TIC
     # is some other value?
@@ -83,6 +95,8 @@ def mc_peak_table(body):
 
 def spectrum_process_table(body):
     """
+    body (str): the section of the ASCII output that corresponds to this table,
+    without the first line with the section name in square brackets
     """
     df = pd.read_table(StringIO(body), skiprows=2).set_index('Spectrum#')
     # TODO make sure to be consistent each time same id is used
@@ -96,6 +110,8 @@ def spectrum_process_table(body):
 # TODO TODO just merge this w/ spectrum process table?
 def similarity_search_results(body):
     """
+    body (str): the section of the ASCII output that corresponds to this table,
+    without the first line with the section name in square brackets
     """
     return pd.read_table(StringIO(body), skiprows=1).rename(
         columns=normalize_name).set_index('spectrum')
@@ -104,6 +120,9 @@ def similarity_search_results(body):
 def keyvalue_table(body):
     """Default parsing functions, for all the basic metadata sections to the
     Shimadzu output.
+
+    body (str): the section of the ASCII output that corresponds to this table,
+    without the first line with the section name in square brackets
     """
     return pd.read_table(StringIO(body), header=None
         ).set_index(0).rename(index=normalize_name)
@@ -255,30 +274,41 @@ def print_peak_warnings(all_data, min_similarity=0, peak_marks=True,
     for sample_name, data in all_data.items():
         print(sample_name)
 
-        marks = data['mc_peak_table']['mark']
-        assert marks.apply(lambda x: 'L' in x).sum() == 0, \
-            'Not sure how to handle "L" peak mark'
+        if peak_marks:
+            marks = data['mc_peak_table']['mark']
+            assert marks.apply(lambda x: 'L' in x).sum() == 0, \
+                'Not sure how to handle "L" peak mark'
 
-        print('{} peaks'.format(len(marks)))
-        print_marked('"unresolved"', 'V')
-        print_marked('primary (tail processing)', 'S')
-        print_marked('secondary (tail processing)', 'T')
-        print_marked('"error"', 'E')
-        print_marked('manual', 'MI')
+            print('{} peaks'.format(len(marks)))
+            print_marked('"unresolved"', 'V')
+            print_marked('primary (tail processing)', 'S')
+            print_marked('secondary (tail processing)', 'T')
+            print_marked('"error"', 'E')
+            print_marked('manual', 'MI')
+
+        # TODO plot spectra for each peak w/ extra processing to check it is
+        # reasonable?
+
+        # TODO TODO somehow figure out whether each peak is saturated somewhere
+        # within its bounds or not
+        # TODO will i be able to call saturation w/o raw mass spectra output?
+        # (both TIC and some methods for getting spectra will underestimate
+        # max...)
+        # TODO could output MC for each m/z? or just read data file? convert to
+        # CDF and read that way?
+        import ipdb
+        ipdb.set_trace()
+
+        if min_similarity > 0:
+            for 
+
+        # TODO kwarg for similarity cutoff to report, 
+        # TODO what actually happens if no match is found, if that's not
+        # "unresolved"?
+
         print('#' * lwidth)
 
-    # TODO plot spectra for each peak w/ extra processing to check it is
-    # reasonable?
-
-    # TODO TODO somehow figure out whether each peak is saturated somewhere
-    # within its bounds or not
-
-    # TODO kwarg for similarity cutoff to report, 
-    # TODO what actually happens if no match is found, if that's not
-    # "unresolved"?
-
-
-
+# TODO replace 'all_data' w/ 'samples'
 # TODO make enclosing class w/ all of the data from a run? put it all in a big
 # table across runs (well, most?)?
 
