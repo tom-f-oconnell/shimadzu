@@ -10,6 +10,7 @@ job in the batch settings.
 import sys
 from io import StringIO
 
+import numpy as np
 import pandas as pd
 
 
@@ -93,6 +94,19 @@ def mc_peak_table(body):
     return df
 
 
+def ms_column_performance_table(body):
+    """
+    body (str): the section of the ASCII output that corresponds to this table,
+    without the first line with the section name in square brackets
+    """
+    # TODO TODO so can this be used to understand the tailing processing?
+    # for manually annotated peaks too?
+    # TODO replace '---' w/ nan? need to replace other values w/ nan elsewhere?
+    df = pd.read_table(StringIO(body), skiprows=1).rename(
+        columns=normalize_name).set_index('peak')
+    return df
+
+
 def spectrum_process_table(body):
     """
     body (str): the section of the ASCII output that corresponds to this table,
@@ -107,7 +121,7 @@ def spectrum_process_table(body):
     return df
 
 
-# TODO TODO just merge this w/ spectrum process table?
+# TODO just merge this w/ spectrum process table?
 def similarity_search_results(body):
     """
     body (str): the section of the ASCII output that corresponds to this table,
@@ -147,12 +161,13 @@ def read(filename):
         'mc_peak_table': mc_peak_table,
         'spectrum_process_table': spectrum_process_table,
         'similarity_search_results': similarity_search_results,
+        'ms_column_performance_table': ms_column_performance_table,
         'ms_spectrum': MassSpectrum,
-        'ms_chromatogram': Chromatogram,
+        'ms_chromatogram': Chromatogram
     }
     with open(filename, 'r') as data:
 
-        all_data = dict()
+        sample_data = dict()
         one_sample_data = dict()
         # TODO probably represent this another way...
         # TODO at least figure out relationsip between indices and ids (just off
@@ -202,7 +217,7 @@ def read(filename):
                     sample_name = one_sample_data['sample_information'][1
                         ].at['sample_name']
 
-                    all_data[sample_name] = one_sample_data
+                    sample_data[sample_name] = one_sample_data
                     one_sample_data = dict()
                     one_sample_data['ms_spectrum'] = []
 
@@ -230,10 +245,10 @@ def read(filename):
                 try:
                     parsed = keyvalue_table(section_body)
                 except Exception as e:
-                    print(e)
-                    print('At line {}'.format(line_num))
-                    print(section_name)
                     print(section_body)
+                    print('In table {}, ending at line {}'.format(section_name,
+                        line_num))
+                    print(e)
                     sys.exit()
 
             if parsed is not None:
@@ -249,12 +264,12 @@ def read(filename):
         if len(one_sample_data) > 1:
             sample_name = one_sample_data['sample_information'][1
                 ].at['sample_name']
-            all_data[sample_name] = one_sample_data
+            sample_data[sample_name] = one_sample_data
 
-    return all_data
+    return sample_data
 
 
-def print_peak_warnings(all_data, min_similarity=0, peak_marks=True,
+def print_peak_warnings(sample_data, min_similarity=93, peak_marks=True,
     saturation=True):
     """
     For manual checking and correction.
@@ -263,7 +278,7 @@ def print_peak_warnings(all_data, min_similarity=0, peak_marks=True,
     def print_marked(name, mark):
         marked = marks[marks.apply(lambda x: mark in x)]
         if len(marked) > 0:
-            print('{} {} peaks:'.format(len(marked), name))
+            print('{} peaks:'.format(name.title()))
             # TODO TODO print ret. times, if there is no way to see peak id in
             # gui (go to table -> click on it?)
             for i in marked.index:
@@ -271,15 +286,15 @@ def print_peak_warnings(all_data, min_similarity=0, peak_marks=True,
             print('')
 
     print('#' * lwidth)
-    for sample_name, data in all_data.items():
+    for sample_name in sorted(list(sample_data.keys())):
         print(sample_name)
+        data = sample_data[sample_name]
 
         if peak_marks:
             marks = data['mc_peak_table']['mark']
             assert marks.apply(lambda x: 'L' in x).sum() == 0, \
                 'Not sure how to handle "L" peak mark'
 
-            print('{} peaks'.format(len(marks)))
             print_marked('"unresolved"', 'V')
             print_marked('primary (tail processing)', 'S')
             print_marked('secondary (tail processing)', 'T')
@@ -296,19 +311,45 @@ def print_peak_warnings(all_data, min_similarity=0, peak_marks=True,
         # max...)
         # TODO could output MC for each m/z? or just read data file? convert to
         # CDF and read that way?
-        import ipdb
-        ipdb.set_trace()
 
         if min_similarity > 0:
-            for 
+            simsearch = data['similarity_search_results']
+            low_similarity = simsearch[(simsearch['hit'] == 1) &
+                (simsearch['si'] < min_similarity)]
 
-        # TODO kwarg for similarity cutoff to report, 
-        # TODO what actually happens if no match is found, if that's not
-        # "unresolved"?
+            # TODO sort from lowest sim to highest?
+            if len(low_similarity) > 0:
+                print('Peaks with SI less than {}:'.format(min_similarity))
+                for i, r in low_similarity.iterrows():
+                    # TODO fixed width
+                    print('{} - {}'.format(i, r['si']))
+                print('')
 
-        print('#' * lwidth)
+        # TODO manually check labels between other two tables and
+        # similarity_search_results seems right, since it doesn't have something
+        # like the retention time to check automatically
+        assert np.all(data['mc_peak_table'].index.unique() ==
+                data['spectrum_process_table'].index.unique())
 
-# TODO replace 'all_data' w/ 'samples'
+        # data['mc_peak_table'].ret_time seems closest to "top" from
+        # spectrum_process_table which, at least for the automatic peak calling,
+        # is the same for both the background and raw columns in that table.
+        assert np.allclose(data['mc_peak_table'].ret_time,
+            data['spectrum_process_table']['raw','top'], atol=5e-3)
+        # TODO (above) are these the appropriate columns to match up, if this
+        # atol is required?
+
+        unidentified = \
+            data['mc_peak_table'][data['mc_peak_table'].name.isnull()].index
+
+        if len(unidentified) > 0:
+            print('Peaks that do not have compounds assigned:')
+            for i in unidentified:
+                print(i)
+
+        print('\n' + ('#' * lwidth))
+
+
 # TODO make enclosing class w/ all of the data from a run? put it all in a big
 # table across runs (well, most?)?
 
@@ -318,8 +359,10 @@ def print_peak_warnings(all_data, min_similarity=0, peak_marks=True,
 
 # TODO could check all sample file names are equal to sample names
 
+# TODO TODO standardize within tuning file. within anything else?
+
 if __name__ == '__main__':
-    data = read('example_data/ASCIIData.txt')
+    data = read('example_data/ASCIIData_min_sim_92.txt')
 
     print_peak_warnings(data)
 
