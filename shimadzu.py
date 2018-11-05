@@ -7,6 +7,7 @@ Generate these output files through the File->Export menu, or as part of a batch
 job in the batch settings.
 """
 
+import os
 import sys
 from io import StringIO
 import traceback
@@ -175,7 +176,10 @@ def read(filename, warn_missing_sections=False):
         'ms_spectrum': MassSpectrum,
         'ms_chromatogram': Chromatogram
     }
+    # TODO TODO fix case where header seems to be missing for some (first?)
+    # sections
     required_tables = {
+        'header',
         'sample_information',
         'mc_peak_table',
         'similarity_search_results'
@@ -348,8 +352,46 @@ def read(filename, warn_missing_sections=False):
     return sample_data
 
 
+def get_saturated_peaks(cdf_filename, peak_table):
+    """
+    Currently unclear whether it is possible to determine the 'saturation' the
+    Shimadzu GUI indicates for a given mass spectrum from the intensity for each
+    mass alone. The best case scenario, there would be a threshold X, wherever
+    the intensity for a given mass equals or exceeds X, it is saturated in that
+    scan.
+
+    As the intensities for each mass do not seem to have a single maximal value,
+    that threshold is either not the maximal value, or the particular maximal
+    value also depends on other variables.
+    """
+    from gcmstools.filetypes import AiaFile
+    data = AiaFile(cdf_filename)
+
+    # TODO support taking just a list of pairs of start, stop retention time,
+    # for more generality?
+    sat_peaks = []
+
+    # TODO TODO some kind of 'training' fn to generate/test simple threshold
+    # model?
+    # m/z dependent saturation? baseline? local sum? 
+    
+    for peak_id, r in peak_table[['proc_from', 'proc_to']].iterrows():
+        start = r['proc_from']
+        end = r['proc_to']
+
+        # TODO how to efficiently get start and end?
+        peak_indices = np.logical_and(data.times >= start, data.time <= end)
+        peak_intensities = data.intensity[peak_indices, :]
+
+        # TODO also print fraction of rows that are saturated?
+        if np.any(peak_intensities >= threshold):
+            sat_peaks.append(peak_id)
+
+    return np.array(sat_peaks)
+
+
 def print_peak_warnings(sample_data, min_similarity=93, peak_marks=True,
-    saturation=True):
+    cdf_directory=None):
     """
     For manual checking and correction.
     """
@@ -438,6 +480,17 @@ def print_peak_warnings(sample_data, min_similarity=93, peak_marks=True,
             for i in unidentified:
                 print(i)
 
+
+        if cdf_directory is not None:
+            # TODO break this stuff into funcion wrapping CDF loading to just
+            # add that data to each entry in sample_data dict?
+            qgd_filename = \
+                os.path.split(data['header'].at['data_file_name',1])[1]
+            cdf_export = os.path.join(cdf_directory, qgd_filename[:-3] + '.CDF')
+
+            sat_peaks = get_saturated_peaks(cdf_export, data['mc_peak_table'])
+
+
         print('\n' + ('#' * lwidth))
 
 
@@ -479,6 +532,7 @@ def standardize(sample_data, standard_data, thru_origin=True):
 
     return standardized_data
 
+
 # TODO make enclosing class w/ all of the data from a run? put it all in a big
 # table across runs (well, most?)?
 
@@ -490,9 +544,12 @@ def standardize(sample_data, standard_data, thru_origin=True):
 
 
 if __name__ == '__main__':
-    sample_data = read('example_data/run2_d1_dan.txt')
+    sample_data = read('example_data/181026_mango_N3_split2_onlyTICMIC.txt')
 
-    print_peak_warnings(sample_data)
+    print_peak_warnings(sample_data, cdf_directory='example_data')
+
+    import ipdb
+    ipdb.set_trace()
 
     standard_data = read('example_data/run2_dan_standards.txt')
     sample_data = standardize(sample_data, standard_data)
