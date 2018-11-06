@@ -352,6 +352,115 @@ def read(filename, warn_missing_sections=False):
     return sample_data
 
 
+def bound_saturation_threshold(cdf_filename, saturation_truth_csv,
+    max_scan_jitter=6):
+    """
+    """
+    import matplotlib.pyplot as plt
+
+    from gcmstools.filetypes import AiaFile
+    data = AiaFile(cdf_filename)
+    scan_time = np.mean(np.diff(data.times))
+
+    # All unlabeled masses in any labelled samples are assumed to be
+    # unsaturated, so it is important to label all saturated peaks in a given
+    # sample.
+    # Columns: sample_name, start_(scan/rettime?), end_scan, m/z
+    truth = pd.read_csv(saturation_truth_csv)
+
+    bounds = []
+    for start_jitter in range(-max_scan_jitter, max_scan_jitter + 1):
+        for end_jitter in range(-max_scan_jitter, max_scan_jitter + 1):
+            threshold_possible = True
+
+            saturated = np.zeros_like(data.intensity, dtype=bool)
+            for _, row in truth.iterrows():
+                start = row['start']
+                end = row['end']
+                m_over_z = row['m/z']
+
+                mz_index = np.argwhere(np.round(m_over_z) == data.masses)[0,0]
+
+                # might want to also get scan before start?
+                saturated[np.logical_and(data.times >= start + (start_jitter +
+                    0.5) * scan_time, data.times <= end + (end_jitter + 0.5) *
+                    scan_time), mz_index] = True
+
+            tentative_bounds = []
+            for mz in range(data.intensity.shape[1]):
+                if saturated[:,mz].sum() > 0:
+                    print(data.masses[mz])
+                    upper_bound = np.min(data.intensity[saturated[:,mz], mz])
+                    lower_bound = np.max(data.intensity[~ saturated[:,mz], mz])
+                    tentative_bounds.append((data.masses[mz], lower_bound,
+                        upper_bound))
+                    '''
+                    print(np.sort(data.intensity[saturated[:,mz],mz])[:10])
+                    print(np.sort(data.intensity[~ saturated[:,mz],mz]
+                        )[::-1][:10])
+                    print(upper_bound)
+                    print(lower_bound)
+                    import ipdb
+                    ipdb.set_trace()
+                    '''
+                    
+                    '''
+                    plt.plot(data.intensity[:, mz])
+                    plt.plot(saturated[:,mz] * np.max(data.intensity[:, mz]) /
+                        2.0)
+
+                    plt.axhline(y=upper_bound, color='r',
+                        label='Min sat. (upper bound)')
+                    plt.axhline(y=lower_bound, color='g',
+                        label='Max unsat. (lower bound)')
+
+                    sat_indices = np.argwhere(saturated[:,mz])
+                    unsat_indices = np.argwhere(~ saturated[:,mz])
+                    au = sat_indices[
+                        np.argmin(data.intensity[saturated[:,mz],mz]), 0]
+                    al = unsat_indices[
+                        np.argmax(data.intensity[~saturated[:,mz],mz]),0]
+
+                    plt.axvline(x=au, color='r')
+                    plt.axvline(x=al, color='g')
+
+                    plt.legend()
+
+                    plt.title('m/z = {}'.format(data.masses[mz]))
+                    plt.show()
+                    import ipdb
+                    ipdb.set_trace()
+                    '''
+
+                    # TODO TODO TODO was this only failing by roughly an
+                    # off-by-one on the time indexing (contract windows a little
+                    # first?)
+                    # TODO global threshold work in that case?
+                    #assert upper_bound >= lower_bound, \
+                    #    'one threshold would not work'
+
+                    if upper_bound < lower_bound:
+                        threshold_possible = False
+                        break
+
+            if not threshold_possible:
+                print(('Threshold not possible with start jitter {}, and ' +
+                    'end jitter {}').format(start_jitter, end_jitter))
+                continue
+
+            else:
+                print(('Threshold POSSIBLE with start jitter {}, and ' +
+                    'end jitter {}!!').format(start_jitter, end_jitter))
+                bounds = tentative_bounds
+
+    print(bounds)
+    return bounds
+    # TODO TODO TODO try m/z specific thresholds...
+
+    #import ipdb
+    #ipdb.set_trace()
+
+
 def get_saturated_peaks(cdf_filename, peak_table):
     """
     Currently unclear whether it is possible to determine the 'saturation' the
@@ -371,10 +480,9 @@ def get_saturated_peaks(cdf_filename, peak_table):
     # for more generality?
     sat_peaks = []
 
-    # TODO TODO some kind of 'training' fn to generate/test simple threshold
-    # model?
     # m/z dependent saturation? baseline? local sum? 
-    
+    threshold = 6500000
+
     for peak_id, r in peak_table[['proc_from', 'proc_to']].iterrows():
         start = r['proc_from']
         end = r['proc_to']
@@ -485,8 +593,8 @@ def print_peak_warnings(sample_data, min_similarity=93, peak_marks=True,
             # TODO break this stuff into funcion wrapping CDF loading to just
             # add that data to each entry in sample_data dict?
             qgd_filename = \
-                os.path.split(data['header'].at['data_file_name',1])[1]
-            cdf_export = os.path.join(cdf_directory, qgd_filename[:-3] + '.CDF')
+                data['header'].at['data_file_name',1].split('\\')[-1]
+            cdf_export = os.path.join(cdf_directory, qgd_filename[:-4] + '.CDF')
 
             sat_peaks = get_saturated_peaks(cdf_export, data['mc_peak_table'])
 
@@ -545,6 +653,13 @@ def standardize(sample_data, standard_data, thru_origin=True):
 
 if __name__ == '__main__':
     sample_data = read('example_data/181026_mango_N3_split2_onlyTICMIC.txt')
+
+    data = sample_data['181026_mango_N3_split2']
+    qgd_filename = data['header'].at['data_file_name',1].split('\\')[-1]
+    cdf_export = os.path.join('example_data', qgd_filename[:-4] + '.CDF')
+    saturation_truth_csv = 'example_data/saturation_truth.csv'
+
+    bounds = bound_saturation_threshold(cdf_export, saturation_truth_csv)
 
     print_peak_warnings(sample_data, cdf_directory='example_data')
 
