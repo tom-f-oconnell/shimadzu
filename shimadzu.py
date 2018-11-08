@@ -598,6 +598,10 @@ def print_peak_warnings(sample_data, min_similarity=93, peak_marks=True,
 
             sat_peaks = get_saturated_peaks(cdf_export, data['mc_peak_table'])
 
+            print('Likely saturated peaks:')
+            for i in sat_peaks:
+                print(i)
+
 
         print('\n' + ('#' * lwidth))
 
@@ -653,13 +657,6 @@ def standardize(sample_data, standard_data, thru_origin=True):
 
 if __name__ == '__main__':
     sample_data = read('example_data/181026_mango_N3_split2_onlyTICMIC.txt')
-
-    data = sample_data['181026_mango_N3_split2']
-    qgd_filename = data['header'].at['data_file_name',1].split('\\')[-1]
-    cdf_export = os.path.join('example_data', qgd_filename[:-4] + '.CDF')
-    saturation_truth_csv = 'example_data/saturation_truth.csv'
-
-    bounds = bound_saturation_threshold(cdf_export, saturation_truth_csv)
 
     print_peak_warnings(sample_data, cdf_directory='example_data')
 
