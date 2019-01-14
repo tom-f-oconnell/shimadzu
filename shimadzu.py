@@ -39,9 +39,13 @@ class MassSpectrum:
         # information in these lines?
         def parse_spectrum_range(s):
             parts = s.split()
-            # TODO what are units for other scan ranges besides "scan"?
             if parts[0] == 'Raw':
-                return (float(parts[2]), float(parts[4]))
+                if '->' in parts:
+                    return (float(parts[2]), float(parts[4]))
+                else:
+                    # TODO maybe rename from "range" to be inclusive of this
+                    # case?
+                    return float(parts[2])
             else:
                 return (float(parts[1]), float(parts[3]))
 
@@ -164,9 +168,40 @@ def normalize_name(n):
     return n
 
 
-def read(filename, warn_missing_sections=False):
+def available_sections():
+    """Returns a dict of the section names here to the strings inside the square
+    brackets starting each section in the Shimadzu ASCII output.
     """
+    # TODO maybe just store ascii names, factor out a fn to normalize,
+    # and normalize ascii names for (most of) these?
+    sections = {
+        'header': 'Header',
+        'file_information': 'File Information',
+        'sample_information': 'Sample Information',
+        'original_files': 'Original Files',
+        'file_description': 'File Description',
+        'mc_peak_table': 'MC Peak Table',
+        'ms_column_performance_table': 'MS Column Performance Table',
+        'spectrum_process_table': 'Spectrum Process Table',
+        'similarity_search_results': ('MS Similarity Search Results ' +
+            'for Spectrum Process Table'),
+        'ms_spectrum': 'MS Spectrum',
+        'ms_chromatogram': 'MS Chromatogram'
+    }
+    # TODO check i'm not missing any that just use the stock parser...
+    # TODO also print out their names where you check the boxes to get output
+    # (which I think are different in some cases?) (in another fn)
+    return sections
+
+
+def read(filename, warn_missing_sections=False, skip_sections=[]):
     """
+    skip_sections (list): A list of names of sections to skip. Either normalized
+        or original names work.
+    """
+    if len(skip_sections) > 0:
+        raise NotImplementedError
+
     # TODO TODO warn for each file that seems to be unannotated
     name2parser = {
         'mc_peak_table': mc_peak_table,
@@ -205,6 +240,8 @@ def read(filename, warn_missing_sections=False):
 
                     parsed = None
                     try:
+                        # TODO TODO support skipping certain sections w/
+                        # None value (to parse remainder in case of error)
                         if section_name in name2parser:
                             parsed = name2parser[section_name](section_body)
                         else:
@@ -350,6 +387,230 @@ def read(filename, warn_missing_sections=False):
             sample_data[sample_name] = one_sample_data
 
     return sample_data
+
+
+def merge_spectrum_and_peak_tables(data_dict):
+    """
+    Takes a dict like the output of read and returns a pandas.DataFrame from
+    merging the mc_peak_table, spectrum_process_table, and
+    similarity_search_results.
+    """
+    raise NotImplementedError
+    # TODO maybe also support merging column performance table or others
+    # TODO rename (raw,top) and like to things like raw_top
+
+
+def merge_simsearch_and_peak_tables(data_dict):
+    """
+    Takes a dict like the output of read and returns a pandas.DataFrame from
+    merging the mc_peak_table and similarity_search_results. Uses the retention
+    times in the spectrum process table to join spectra to peaks.
+    """
+    peak_df = data_dict['mc_peak_table']
+
+    simsearch = data_dict['similarity_search_results']
+    specprocess = data_dict['spectrum_process_table']
+
+    ss_duplicate_spectra = simsearch[simsearch.duplicated()].index
+    sp_duplicate_spectra = specprocess[specprocess.duplicated()].index
+
+    # Sometimes there are duplicate rows in the sim search table that do not
+    # correspond to duplicate rows in the spectrum process table.
+    # These should not be dropped.
+    ss_dup_set = set(ss_duplicate_spectra)
+    for s in sp_duplicate_spectra:
+        assert s in ss_dup_set
+
+    ss_to_drop = \
+        ss_duplicate_spectra[ss_duplicate_spectra.isin(sp_duplicate_spectra)]
+    assert set(ss_to_drop) == set(sp_duplicate_spectra)
+
+    if len(ss_to_drop) > 0:
+        print('\ndropping from simsearch:')
+        print(simsearch.loc[ss_to_drop])
+
+    if len(sp_duplicate_spectra) > 0:
+        print('dropping from specprocess:')
+        print(specprocess.loc[sp_duplicate_spectra])
+        print('')
+
+    simsearch.drop(ss_to_drop, inplace=True)
+    specprocess.drop(sp_duplicate_spectra, inplace=True)
+
+    # TODO if there are cases where there are duplicates in one and not the
+    # other, warn before dropping
+
+    # TODO check there are no duplicates before this join
+    # (if there are duplicates in end column, need some other key to match up
+    # the spectra w/ the peaks...)
+    simsearch_df = simsearch.join(specprocess['background'][['start','end']])
+
+    sn = data_dict['sample_information'].at['sample_name',1]
+
+    # Checking the rounding would not confuse peaks.
+    assert not peak_df.duplicated(subset=['proc_from','proc_to']).any()
+    assert not simsearch_df.duplicated(subset=['start','end']).any()
+
+    df = pd.merge(peak_df.reset_index(), simsearch_df.reset_index(), how='left',
+        left_on=['proc_from','proc_to'], right_on=['start','end'],
+        validate='one_to_one')
+
+    unmatched_spectra = (set(simsearch_df.index.unique()) - 
+                         set(df.spectrum.unique()))
+
+    # TODO could also try searching over peak w/o names in the same way,
+    # in case some search results are not associated w/ integration peaks?
+    unmatched_peaks = df[pd.notnull(df[['peak','name_x']]).all(axis=1) &
+                         pd.isnull(df.spectrum)].index
+
+    for s in unmatched_spectra:
+        top = specprocess.loc[s, ('raw','top')]
+        print('spectrum {}, peak @ {:.3f}'.format(s, top))
+        print('spec name = {}'.format(simsearch_df.at[s, 'name']))
+
+        matching_from = None
+        matching_to = None
+        matching_idx = None
+        for i in unmatched_peaks:
+            proc_from = df.at[i,'proc_from']
+            proc_to = df.at[i,'proc_to']
+            print(df.loc[i,['peak','proc_from','proc_to','name_x']])
+
+            # TODO TODO handle case where multiple proc_<from/to> ranges
+            # include this top (need to find smallest range)
+            if proc_from <= top and top <= proc_to:
+                if matching_idx is None:
+                    print('first match found')
+                    matching_from = proc_from
+                    matching_to = proc_to
+                    matching_idx = i
+
+                # Existing match encloses the current integration range
+                # (current integration range is more specific).
+                elif matching_from <= proc_from and proc_to <= matching_to:
+                    print('found smaller matching peak')
+                    matching_from = proc_from
+                    matching_to = proc_to
+                    matching_idx = i
+
+                # Current integration range encloses the existing match.
+                elif proc_from <= matching_from and matching_to <= proc_to:
+                    print('keeping existing match')
+                    pass
+
+                else:
+                    assert False, ('Neither range enclosed other. Both ' +
+                        'contained spectrum {} top'.format(s))
+
+            else:
+                print('peak not in range')
+
+        if matching_idx is None:
+            continue
+
+        print('matching spectra {} to peak {}'.format(s,
+            df.at[matching_idx, 'peak']))
+
+        assert pd.isnull(df.at[matching_idx, 'spectrum']), \
+            'this peak has already been assigned a spectrum'
+
+        # Even if it doesn't correspond to a search result, each integration
+        # range should have been assigned a spectrum in the spectrum process
+        # table.
+        # (but only looking at peaks with names, some spectra won't find
+        # partners, so I can't assert this.)
+        # Now, just checking after loop.
+        #assert matching_idx is not None, \
+        #    'no matching peak for spectrum {}'.format(s)
+
+        # TODO more idiomatic way to merge row by row?
+        for k, v in simsearch_df.loc[s].iteritems():
+            if k + '_x' in df.columns:
+                assert k not in df.columns
+                k = k + '_y'
+
+            if not (pd.isnull(df.at[matching_idx, k]) or
+                    df.at[matching_idx, k] == v):
+                # TODO why do some things seem to be false by default? suppress
+                # output in (at least) that case?
+                print('overwriting {}={} with {} for peak {}'.format(k,
+                    df.at[matching_idx, k] == v, v,
+                    df.at[matching_idx, 'peak']))
+
+            df.at[matching_idx, k] = v
+
+        df.at[matching_idx, 'spectrum'] = s
+
+    # TODO TODO specifically test some cases where spectrum and peak #s don't
+    # match up (i'm not overwriting spectrum column with peaks or something, am
+    # i?)
+    # Each peak has a spectrum, and vice versa.
+    assert (pd.notnull(df.loc[pd.notnull(df.name_x), ['peak','spectrum']]
+            ).all().all())
+    # Each peak is only assigned to one spectrum, and vice versa.
+    assert len(df) == len(df.peak.unique())
+    assert (len(df[pd.notnull(df.name_x)]) ==
+            len(df[pd.notnull(df.name_x)].spectrum.unique()))
+
+    # TODO maybe just merge on name in case above fails?
+
+    df['name_y'] = df.name_y.apply(lambda x: x.split('$$')[0].strip()
+        if pd.notnull(x) else x)
+
+    # TODO just use check name_y for assertion, but warn if x is not null and y
+    # is null?
+    name_match_rows = ((df.name_x == df.name_y) |
+        pd.isnull(df[['name_x','name_y']]).all(axis=1))
+    table_mismatch = not name_match_rows.all()
+
+    verbose = True
+
+    if table_mismatch:
+        #####import ipdb; ipdb.set_trace()
+
+        # TODO maybe print out all tables for mismatch and a few for
+        # non-mismatch to see any patterns that might reveal cause?
+        print('table mismatch at', sn)
+
+        if verbose:
+            print('\nMISMATCH BETWEEN NAMES IN PEAK / SPECTRUM TABLES!!')
+            print(df.loc[~ name_match_rows, ['peak','spectrum','name_x',
+                'name_y','proc_from','start','proc_to','end']])
+            print('')
+
+        assert False
+
+    else:
+        print('no table mismatch at', sn)
+
+    if verbose and table_mismatch:
+        print('Peak table:')
+        print(peak_df[['ret_time','proc_from','proc_to','name',
+            'mark']])
+        print('Merged spectrum process and similarity search tables:')
+        print(simsearch_df[['name','start','end']])
+        print('\nSpectrum process table:')
+        print(specprocess)
+        # TODO maybe print out spectra not matched to peaks?
+        # TODO keep and print rows w/ times from spectrum process table?
+        print('Merged tables:')
+        print(df[['peak','spectrum','proc_from','start','proc_to','end',
+            'ret_time','name_x','name_y','mark']])
+
+        # TODO print tables before dropping this stuff?
+        print('simsearch to drop:', ss_to_drop)
+        print('specprocess to drop:', sp_duplicate_spectra)
+        print('')
+
+
+    df.drop(columns=['name_y'], inplace=True)
+    df.rename(columns={'name_x': 'name'}, inplace=True)
+
+    # TODO assert if something was in simsearch_df, it was also in peak_df?
+    # 1:1 validate above sufficient?
+    df.drop(columns=['start','end'], inplace=True)
+
+    return df, table_mismatch
 
 
 def bound_saturation_threshold(cdf_filename, saturation_truth_csv,
@@ -575,6 +836,7 @@ def print_peak_warnings(sample_data, min_similarity=93, peak_marks=True,
             # spectrum_process_table which, at least for the automatic peak
             # calling, is the same for both the background and raw columns in
             # that table.
+            # TODO TODO change to using background, end ?
             assert np.allclose(data['mc_peak_table'].ret_time,
                 data['spectrum_process_table']['raw','top'], atol=5e-3)
             # TODO (above) are these the appropriate columns to match up, if
@@ -623,6 +885,7 @@ def standardize(sample_data, standard_data, thru_origin=True):
     # flags built in to shimadzu software?
     # TODO support loading calibration output from their software into the same
     # format this returns
+    raise NotImplementedError
 
     chem2curve = dict()
     for name, data in standard_data.items():
