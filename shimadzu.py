@@ -443,9 +443,13 @@ def merge_simsearch_and_peak_tables(data_dict):
     # TODO check there are no duplicates before this join
     # (if there are duplicates in end column, need some other key to match up
     # the spectra w/ the peaks...)
+    # TODO TODO TODO fix case where analysis was not entirely automated, and
+    # background may not all exist in specprocess table. i forget, was i merging
+    # on this because the spectrum # itself could not be relied on sometimes?
+    # i feel like that was the reason...
     simsearch_df = simsearch.join(specprocess['background'][['start','end']])
 
-    sn = data_dict['sample_information'].at['sample_name',1]
+    sn = data_dict['sample_information'].at['sample_name', 1]
 
     # Checking the rounding would not confuse peaks.
     assert not peak_df.duplicated(subset=['proc_from','proc_to']).any()
@@ -453,10 +457,10 @@ def merge_simsearch_and_peak_tables(data_dict):
 
     df = pd.merge(peak_df.reset_index(), simsearch_df.reset_index(), how='left',
         left_on=['proc_from','proc_to'], right_on=['start','end'],
-        validate='one_to_one')
-
-    unmatched_spectra = (set(simsearch_df.index.unique()) - 
-                         set(df.spectrum.unique()))
+        validate='one_to_one'
+    )
+    unmatched_spectra = \
+        set(simsearch_df.index.unique()) - set(df.spectrum.unique())
 
     # TODO could also try searching over peak w/o names in the same way,
     # in case some search results are not associated w/ integration peaks?
@@ -566,8 +570,6 @@ def merge_simsearch_and_peak_tables(data_dict):
     verbose = True
 
     if table_mismatch:
-        #####import ipdb; ipdb.set_trace()
-
         # TODO maybe print out all tables for mismatch and a few for
         # non-mismatch to see any patterns that might reveal cause?
         print('table mismatch at', sn)
